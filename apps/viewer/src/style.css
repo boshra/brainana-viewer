@@ -115,6 +115,13 @@ select:disabled { opacity: 0.45; cursor: default; }
    as the text view buttons. Tune this one value if the icons feel large/small. */
 .layout-btn svg { display: block; width: auto; height: 15px; fill: currentColor; opacity: 0.55; }
 .layout-btn:hover:not(.active) svg, .layout-btn.active svg { opacity: 1; }
+.tb-view-tools { display: inline-flex; gap: 2px; margin-left: 6px; }
+.view-btn.bg-toggle-btn { border-radius: var(--r-sm); }
+.view-btn.bg-toggle-btn.active {
+  border-color: var(--accent);
+  color: var(--accent-2);
+  background: var(--accent-tint);
+}
 /* Toolbar category tabs: a 2x2 block filling BOTH bar rows (this cluster's second row used to sit
    empty while the four tabs fought for width in the first). The active tab carries an amber
    underline. Buttons stretch to their column, so the block reads as one unit. */
@@ -299,7 +306,7 @@ input[type="range"]:focus { outline: none; }
 .rail-btn { width: 100%; }
 /* The export action. The icon and the ellipsis do the signalling, so it stays a ghost button rather
    than competing with the accent used for a dialog's confirm. */
-.report-btn { gap: var(--sp-2); }
+.report-btn, .export-svg-btn { gap: var(--sp-2); }
 /* No hairline above the list: it read as a divider cutting `+ point` off from the points it adds,
    and the block's own gap already separates them. Drop .group's padding with it, or the removed
    border leaves a double gap behind. Two classes because .group's own border-top is declared later
@@ -489,6 +496,10 @@ input.point-name { grid-area: name; width: 100%; min-width: 0; padding: 0 var(--
 .field.inline { flex-direction: row; align-items: center; gap: 6px; }
 
 .slice-pane, .surface-pane { position: relative; background: #000; min-height: 0; overflow: hidden; }
+.dashboard[data-canvas-bg="white"] .slice-pane,
+.dashboard[data-canvas-bg="white"] .surface-pane {
+  background: #fff;
+}
 .nv-canvas { width: 100%; height: 100%; display: block; }
 .orientation-widget {
   position: absolute; right: 10px; bottom: 10px;
@@ -858,6 +869,16 @@ input.slider-num { flex: 0 0 auto; width: var(--num-w); padding: 0 var(--sp-1); 
 .report-filename { margin: var(--sp-3) 0 0; }
 .report-folder { color: var(--muted); font-family: var(--mono); font-size: var(--fs-1);
   overflow-wrap: anywhere; }
+
+/* Export Figure Dialog */
+.export-figure-dialog { width: min(560px, 92vw); }
+.export-figure-dialog .dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-2); margin-bottom: var(--sp-4); }
+.export-figure-dialog .dialog-head .dialog-title-col { display: flex; flex-direction: column; gap: var(--sp-1); }
+.export-figure-dialog .dialog-head p { margin: 0; }
+.export-figure-dialog .radio-group { display: flex; flex-direction: column; gap: var(--sp-2); }
+.export-figure-dialog .radio-row { display: flex; align-items: center; gap: var(--sp-2); cursor: pointer; color: var(--text); font-size: var(--fs-sm); }
+.export-figure-dialog .stack-gap { display: flex; flex-direction: column; gap: var(--sp-2); }
+.export-figure-dialog .text-sm { font-size: var(--fs-xs); }
 
 /* Change tab: ROI table slot below the map pickers (border matches .color-display). */
 .change-slot {

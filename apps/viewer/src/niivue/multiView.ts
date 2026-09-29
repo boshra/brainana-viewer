@@ -144,6 +144,8 @@ export async function initNiivuePair(
 export class MultiView {
   readonly slices: Niivue
   readonly render: Niivue
+  readonly slicesCanvas: HTMLCanvasElement
+  readonly renderCanvas: HTMLCanvasElement
   #client: RuntimeClient
   #baseVol: NVImage | null = null
   // Pristine copy of the base volume's raw voxels, captured lazily the first time a clip is applied.
@@ -198,17 +200,19 @@ export class MultiView {
     const slices = niivue()
     const render = niivue()
     await initNiivuePair(slices, render, slicesCanvas, renderCanvas)
-    return new MultiView(slices, render, client)
+    return new MultiView(slices, render, client, slicesCanvas, renderCanvas)
   }
 
   /**
    * Private: instances arrive already attached and configured, from create(). Everything here is
    * pure wiring that needs no GL context.
    */
-  private constructor(slices: Niivue, render: Niivue, client: RuntimeClient) {
+  private constructor(slices: Niivue, render: Niivue, client: RuntimeClient, slicesCanvas: HTMLCanvasElement, renderCanvas: HTMLCanvasElement) {
     this.#client = client
     this.slices = slices
     this.render = render
+    this.slicesCanvas = slicesCanvas
+    this.renderCanvas = renderCanvas
 
     // Manual crosshair coupling (Align pattern): each instance mirrors the world coord to the
     // other via mm2frac; a suppress flag cleared on the next rAF prevents feedback loops.
@@ -258,6 +262,232 @@ export class MultiView {
   setSliceOrientationVisible(on: boolean): void {
     this.slices.opts.isOrientationTextVisible = on
     this.slices.drawScene()
+  }
+
+  #whiteBackground = false
+  setBackgroundColor(white: boolean): void {
+    this.#whiteBackground = white
+    const bg: [number, number, number, number] = white ? [1, 1, 1, 1] : [0, 0, 0, 1]
+    this.slices.opts.backColor = bg
+    this.render.opts.backColor = bg
+    // Contrast-tuned crosshair: on dark background use light green (#8bbf6e), on white use deep forest green
+    const cross: [number, number, number, number] = white ? [0.14, 0.45, 0.14, 1] : [0.545, 0.749, 0.431, 1]
+    this.slices.opts.crosshairColor = cross
+    this.render.opts.crosshairColor = cross
+    this.slices.drawScene()
+    this.render.drawScene()
+  }
+
+  isWhiteBackground(): boolean {
+    return this.#whiteBackground
+  }
+
+  hasActiveOverlay(): boolean {
+    return this.#atlasVol !== null || this.#funcVol !== null || this.#atlasLayerIndex >= 0 || this.#funcLayerIndex >= 0
+  }
+
+  activeOverlayTitle(): string | null {
+    if (this.#urls.atlasName) return this.#urls.atlasName
+    if (this.#urls.atlas) return 'Atlas'
+    if (this.#urls.functional) return 'Function'
+    return null
+  }
+
+  /**
+   * Synchronously capture the slices pane as both underlay (no overlay) and composite (with overlay) 2D canvases.
+   * Restores all original opacities and crosshairs in a finally block so the viewer state is never corrupted.
+   */
+  captureSlicesCanvases(scale = 1, whiteBg = false, hideAnnotations = true, transparent = true): { underlay: HTMLCanvasElement; composite: HTMLCanvasElement; annotations?: HTMLCanvasElement } | null {
+    const canvas = this.slicesCanvas
+    if (!canvas || !canvas.width || !canvas.height) return null
+
+    const origBackColor = [...(this.slices.opts.backColor || [0, 0, 0, 1])] as [number, number, number, number]
+    const origCrossWidth = (this.slices as unknown as { opts: { crosshairWidth: number } }).opts.crosshairWidth
+    const origOrient = this.slices.opts.isOrientationTextVisible
+
+    const atlasIdx = this.#atlasVol ? this.slices.getVolumeIndexByID(this.#atlasVol.id) : -1
+    const funcIdx = this.#funcVol ? this.slices.getVolumeIndexByID(this.#funcVol.id) : -1
+    const origAtlasOpacity = atlasIdx >= 0 ? this.slices.volumes[atlasIdx].opacity : 0
+    const origFuncOpacity = funcIdx >= 0 ? this.slices.volumes[funcIdx].opacity : 0
+
+    const w = Math.max(1, Math.round(canvas.width * scale))
+    const h = Math.max(1, Math.round(canvas.height * scale))
+    const underlay = document.createElement('canvas')
+    underlay.width = w
+    underlay.height = h
+    const uCtx = underlay.getContext('2d')
+    const composite = document.createElement('canvas')
+    composite.width = w
+    composite.height = h
+    const cCtx = composite.getContext('2d')
+    if (!uCtx || !cCtx) return null
+
+    let annotations: HTMLCanvasElement | undefined
+
+    try {
+      const exportBg: [number, number, number, number] = transparent
+        ? (whiteBg ? [1, 1, 1, 0] : [0, 0, 0, 0])
+        : (whiteBg ? [1, 1, 1, 1] : [0, 0, 0, 1])
+      this.slices.opts.backColor = exportBg
+
+      // Always keep annotations hidden for underlay and composite so base anatomy is pristine
+      const nv = this.slices as unknown as { setCrosshairWidth?: (w: number) => void; opts: { crosshairWidth: number } }
+      if (nv.setCrosshairWidth) nv.setCrosshairWidth(0)
+      else nv.opts.crosshairWidth = 0
+      this.slices.opts.isOrientationTextVisible = false
+
+      // Step A: Underlay (mute overlays, hide annotations)
+      if (atlasIdx >= 0) this.slices.setOpacity(atlasIdx, 0)
+      if (funcIdx >= 0) this.slices.setOpacity(funcIdx, 0)
+      this.slices.drawScene()
+      uCtx.drawImage(canvas, 0, 0, w, h)
+
+      // Step B: Composite (restore overlays, hide annotations)
+      if (atlasIdx >= 0) this.slices.setOpacity(atlasIdx, origAtlasOpacity)
+      if (funcIdx >= 0) this.slices.setOpacity(funcIdx, origFuncOpacity)
+      this.slices.drawScene()
+      cCtx.drawImage(canvas, 0, 0, w, h)
+
+      // Step C: Annotations layer (overlays muted, annotations enabled)
+      if (!hideAnnotations) {
+        if (atlasIdx >= 0) this.slices.setOpacity(atlasIdx, 0)
+        if (funcIdx >= 0) this.slices.setOpacity(funcIdx, 0)
+        if (nv.setCrosshairWidth) nv.setCrosshairWidth(origCrossWidth)
+        else nv.opts.crosshairWidth = origCrossWidth
+        this.slices.opts.isOrientationTextVisible = origOrient
+        this.slices.drawScene()
+
+        const aCanvas = document.createElement('canvas')
+        aCanvas.width = w
+        aCanvas.height = h
+        const aCtx = aCanvas.getContext('2d')
+        if (aCtx) {
+          aCtx.drawImage(canvas, 0, 0, w, h)
+          annotations = aCanvas
+        }
+      }
+
+      return { underlay, composite, annotations }
+    } finally {
+      this.slices.opts.backColor = origBackColor
+      const nv = this.slices as unknown as { setCrosshairWidth?: (w: number) => void; opts: { crosshairWidth: number } }
+      if (nv.setCrosshairWidth) nv.setCrosshairWidth(origCrossWidth)
+      else nv.opts.crosshairWidth = origCrossWidth
+      this.slices.opts.isOrientationTextVisible = origOrient
+      if (atlasIdx >= 0) this.slices.setOpacity(atlasIdx, origAtlasOpacity)
+      if (funcIdx >= 0) this.slices.setOpacity(funcIdx, origFuncOpacity)
+      this.slices.drawScene()
+    }
+  }
+
+  /**
+   * Synchronously capture the surface pane as both underlay (no overlay) and composite (with overlay) 2D canvases.
+   * Restores all original opacities and mesh state in a finally block so the viewer state is never corrupted.
+   */
+  captureSurfaceCanvases(scale = 1, whiteBg = false, hideAnnotations = true, transparent = true): { underlay: HTMLCanvasElement; composite: HTMLCanvasElement; annotations?: HTMLCanvasElement } | null {
+    const canvas = this.renderCanvas
+    if (!canvas || !canvas.width || !canvas.height) return null
+
+    const gl = (this.render as unknown as { gl: WebGL2RenderingContext }).gl
+    const origBackColor = [...(this.render.opts.backColor || [0, 0, 0, 1])] as [number, number, number, number]
+
+    const atlasIdx = this.#atlasLayerIndex
+    const funcIdx = this.#funcLayerIndex
+    let origAtlasOpacity = 1
+    let origFuncOpacity = 1
+
+    for (const mesh of this.#displayMeshes) {
+      const m = mesh as unknown as { layers?: Array<{ opacity: number }> }
+      if (atlasIdx >= 0 && m.layers?.[atlasIdx]) origAtlasOpacity = m.layers[atlasIdx].opacity
+      if (funcIdx >= 0 && m.layers?.[funcIdx]) origFuncOpacity = m.layers[funcIdx].opacity
+    }
+
+    const markerMesh = (this.render.meshes as NVMesh[]).find((m) => m.name === 'selected-location')
+    const origMarkerVisible = markerMesh?.visible ?? false
+
+    const w = Math.max(1, Math.round(canvas.width * scale))
+    const h = Math.max(1, Math.round(canvas.height * scale))
+    const underlay = document.createElement('canvas')
+    underlay.width = w
+    underlay.height = h
+    const uCtx = underlay.getContext('2d')
+    const composite = document.createElement('canvas')
+    composite.width = w
+    composite.height = h
+    const cCtx = composite.getContext('2d')
+    if (!uCtx || !cCtx) return null
+
+    let annotations: HTMLCanvasElement | undefined
+
+    try {
+      const exportBg: [number, number, number, number] = transparent
+        ? (whiteBg ? [1, 1, 1, 0] : [0, 0, 0, 0])
+        : (whiteBg ? [1, 1, 1, 1] : [0, 0, 0, 1])
+      this.render.opts.backColor = exportBg
+
+      // Always hide marker on underlay and composite so surface anatomy is pristine
+      if (markerMesh) markerMesh.visible = false
+
+      // Step A: Underlay (mute overlay layers, hide marker)
+      if (atlasIdx >= 0 || funcIdx >= 0) {
+        for (const mesh of this.#displayMeshes) {
+          const m = mesh as unknown as { layers?: Array<{ opacity: number }>; updateMesh?: (gl: WebGL2RenderingContext) => void }
+          if (atlasIdx >= 0 && m.layers?.[atlasIdx]) m.layers[atlasIdx].opacity = 0
+          if (funcIdx >= 0 && m.layers?.[funcIdx]) m.layers[funcIdx].opacity = 0
+          m.updateMesh?.(gl)
+        }
+      }
+      this.render.drawScene()
+      uCtx.drawImage(canvas, 0, 0, w, h)
+
+      // Step B: Composite (restore overlay layers, hide marker)
+      if (atlasIdx >= 0 || funcIdx >= 0) {
+        for (const mesh of this.#displayMeshes) {
+          const m = mesh as unknown as { layers?: Array<{ opacity: number }>; updateMesh?: (gl: WebGL2RenderingContext) => void }
+          if (atlasIdx >= 0 && m.layers?.[atlasIdx]) m.layers[atlasIdx].opacity = origAtlasOpacity
+          if (funcIdx >= 0 && m.layers?.[funcIdx]) m.layers[funcIdx].opacity = origFuncOpacity
+          m.updateMesh?.(gl)
+        }
+      }
+      this.render.drawScene()
+      cCtx.drawImage(canvas, 0, 0, w, h)
+
+      // Step C: Surface marker layer (overlays muted, marker visible)
+      if (!hideAnnotations && markerMesh && origMarkerVisible) {
+        if (atlasIdx >= 0 || funcIdx >= 0) {
+          for (const mesh of this.#displayMeshes) {
+            const m = mesh as unknown as { layers?: Array<{ opacity: number }>; updateMesh?: (gl: WebGL2RenderingContext) => void }
+            if (atlasIdx >= 0 && m.layers?.[atlasIdx]) m.layers[atlasIdx].opacity = 0
+            if (funcIdx >= 0 && m.layers?.[funcIdx]) m.layers[funcIdx].opacity = 0
+            m.updateMesh?.(gl)
+          }
+        }
+        markerMesh.visible = true
+        this.render.drawScene()
+        const aCanvas = document.createElement('canvas')
+        aCanvas.width = w
+        aCanvas.height = h
+        const aCtx = aCanvas.getContext('2d')
+        if (aCtx) {
+          aCtx.drawImage(canvas, 0, 0, w, h)
+          annotations = aCanvas
+        }
+      }
+
+      return { underlay, composite, annotations }
+    } finally {
+      this.render.opts.backColor = origBackColor
+      if (markerMesh) markerMesh.visible = origMarkerVisible
+      if (atlasIdx >= 0 || funcIdx >= 0) {
+        for (const mesh of this.#displayMeshes) {
+          const m = mesh as unknown as { layers?: Array<{ opacity: number }>; updateMesh?: (gl: WebGL2RenderingContext) => void }
+          if (atlasIdx >= 0 && m.layers?.[atlasIdx]) m.layers[atlasIdx].opacity = origAtlasOpacity
+          if (funcIdx >= 0 && m.layers?.[funcIdx]) m.layers[funcIdx].opacity = origFuncOpacity
+          m.updateMesh?.(gl)
+        }
+      }
+      this.render.drawScene()
+    }
   }
 
   // Load (or switch) the base volume. The volume lives ONLY in the slices instance — the

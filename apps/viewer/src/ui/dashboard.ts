@@ -36,6 +36,8 @@ import { createColorDisplay, type ColorDisplay, type ColorDisplayTarget } from '
 import { collectAtlasRows, collectVertex, collectMorphology, collectRetinotopy, collectSomatotopy, collectVisualFieldPoints } from '../report/collect.ts'
 import { BookmarkStore, bookmarkName, sameBookmarkIds } from '../report/bookmarks.ts'
 import { mountReportDialog } from '../report/dialog.ts'
+import { mountExportFigureDialog } from './dialogs/exportFigure.ts'
+import type { LegendExportInfo } from '../export/svgExport.ts'
 import type { LocationReadout, ViewState } from '../report/model.ts'
 import type { ReportContext } from '../report/generate.ts'
 
@@ -160,6 +162,10 @@ function strokeIcon(size: number, paths: string[]): SVGSVGElement {
 function downloadIcon(): SVGSVGElement {
   return strokeIcon(13, ['M12 3v11', 'M7.5 10l4.5 4.5L16.5 10', 'M4 20h16'])
 }
+// Image icon for SVG figure export.
+function exportSvgIcon(): SVGSVGElement {
+  return strokeIcon(13, ['M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5z', 'M8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z', 'M21 15l-5-5L5 21'])
+}
 // Crosshair: "move the crosshair here", on a bookmarked point's row.
 function crosshairIcon(): SVGSVGElement {
   return strokeIcon(12, ['M12 2.5v5', 'M12 16.5v5', 'M2.5 12h5', 'M16.5 12h5', 'M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0'])
@@ -273,6 +279,41 @@ export function mountDashboard(root: HTMLElement, deps: Deps): void {
   ) as HTMLButtonElement
   addPointBtn.disabled = true
   reportBtn.disabled = true
+
+  const exportSvgRailBtn = h(
+    'button',
+    { type: 'button', class: 'ghost rail-btn export-svg-btn', title: 'Export publication figure (.svg)…' },
+    [exportSvgIcon(), h('span', {}, ['export figure (.svg)…'])],
+  ) as HTMLButtonElement
+  exportSvgRailBtn.disabled = true
+
+  let isWhiteBg = false
+  try {
+    localStorage.removeItem('brainana_canvas_bg')
+  } catch {
+    // ignore
+  }
+
+  const whiteBgBtn = h(
+    'button',
+    {
+      type: 'button',
+      class: 'view-btn bg-toggle-btn',
+      title: 'Toggle white background for publication',
+    },
+    ['white bg'],
+  ) as HTMLButtonElement
+
+  let mainEl: HTMLElement | null = null
+  const setWhiteBg = (white: boolean): void => {
+    isWhiteBg = white
+    whiteBgBtn.classList.toggle('active', white)
+    whiteBgBtn.title = white ? 'Switch to dark background' : 'Toggle white background for publication'
+    if (mainEl) mainEl.dataset.canvasBg = white ? 'white' : 'dark'
+    view?.setBackgroundColor(white)
+  }
+  whiteBgBtn.addEventListener('click', () => setWhiteBg(!isWhiteBg))
+
   const viewBtns = VIEW_PRESETS.map((v) => {
     const b = h('button', { type: 'button', class: 'view-btn', title: `${v.label} view` }, [v.label])
     b.dataset.view = v.k
@@ -357,9 +398,9 @@ export function mountDashboard(root: HTMLElement, deps: Deps): void {
         h('label', { class: 'tb-field inline tb-layer-row' }, [surfCheck, h('span', { class: 'tb-layer-name' }, ['surf']), surfSelect]),
       ]),
     ]),
-    // view section — slice montage layouts (row 1) · surface view presets (row 2)
+    // view section — slice montage layouts + white bg (row 1) · surface view presets (row 2)
     tbGroup('', [
-      h('div', { class: 'tb-cell' }, [h('div', { class: 'montage' }, layoutBtns)]),
+      h('div', { class: 'tb-cell' }, [h('div', { class: 'montage' }, layoutBtns), h('div', { class: 'tb-view-tools' }, [whiteBgBtn])]),
       h('div', { class: 'tb-cell' }, [h('div', { class: 'views' }, viewBtns)]),
     ]),
     // LH/RH hemisphere toggles in the vol row (row 1) — occupying the slot vacated by the crosshair +
@@ -460,6 +501,8 @@ export function mountDashboard(root: HTMLElement, deps: Deps): void {
   const loadingText = h('div', { class: 'loading-text' }, ['Loading…'])
   const loadingOverlay = h('div', { class: 'loading-overlay', hidden: true }, [h('div', { class: 'spinner' }), loadingText])
   const main = h('main', { class: 'dashboard' }, [viewerArea, atlasLegend, panelResizer, infoResizer, railResizer, infoPanel, placeholder, loadingOverlay])
+  mainEl = main
+  if (isWhiteBg) main.dataset.canvasBg = 'white'
 
   // --- right underlay rail: base-volume intensity window (brightness/contrast ↔ display min/max),
   // value clip, montage zoom, plus the crosshair + AP/SI/LR toggles moved out of the top bar. All
@@ -628,6 +671,7 @@ export function mountDashboard(root: HTMLElement, deps: Deps): void {
     h('div', { class: 'vol-rail-head' }, [h('span', { class: 'vol-rail-title' }, ['points']), pointCount]),
     addPointBtn,
     pointListGroup,
+    exportSvgRailBtn,
     reportBtn,
   ])
   const volRail = h('aside', { class: 'vol-rail' }, [underlayBlock, pointsBlock])
@@ -2325,6 +2369,7 @@ export function mountDashboard(root: HTMLElement, deps: Deps): void {
     // would read as broken.
     addPointBtn.disabled = !ready || !lastMm
     reportBtn.disabled = !ready
+    exportSvgRailBtn.disabled = !ready
     const count = bookmarks.count()
     pointCount.textContent = String(count)
     pointListHead.textContent = count === 0 ? 'bookmarked' : `bookmarked (${count})`
@@ -2400,6 +2445,55 @@ export function mountDashboard(root: HTMLElement, deps: Deps): void {
     })
   })
 
+  const openExportDialog = (): void => {
+    if (!view || !manifest) return
+
+    const target = colorTarget()
+    let legendInfo: LegendExportInfo | null = null
+    if (target === 'function' && funcChoice) {
+      const key = funcColormapKey()
+      legendInfo = {
+        title: `${funcChoice.kind === 'retinotopy' ? 'Retinotopy' : 'Somatotopy'} · ${funcChoice.mode.label}`,
+        gradient: colormapGradients[key] ?? FALLBACK_GRADIENT,
+        lut: colormapLuts[key],
+        displayRange: { min: funcCalMin, max: funcCalMax },
+        barTicks: funcChoice.kind === 'somatotopy' ? (['foot', 'hand', 'face'] as [string, string, string]) : undefined,
+      }
+    } else if (target === 'morphology') {
+      const metric = morphActiveMetric()
+      const key = morphColormaps[metric] ?? 'gray'
+      legendInfo = {
+        title: `Morphology · ${metric}`,
+        gradient: colormapGradients[key] ?? FALLBACK_GRADIENT,
+        lut: colormapLuts[key],
+        displayRange: morphRanges[metric],
+      }
+    } else if (target === 'atlas' && lastAtlasSel) {
+      const key = atlasColormap ?? LABELS_KEY
+      if (atlasColormap !== null) {
+        legendInfo = {
+          title: `Atlas · ${lastAtlasSel.name}`,
+          gradient: colormapGradients[key] ?? FALLBACK_GRADIENT,
+          lut: colormapLuts[key],
+          displayRange: { min: atlasDisplayMin, max: atlasDisplayMax },
+        }
+      }
+    }
+
+    mountExportFigureDialog({
+      view,
+      activeLayout: store.get('layout'),
+      volEnabled: volCheck.checked,
+      surfEnabled: surfCheck.checked,
+      annotationsEnabled: crosshairCheck.checked || orientCheck.checked || markerCheck.checked,
+      legendInfo,
+      subjectId: manifest.id,
+      isWhiteBackground: isWhiteBg,
+    })
+  }
+
+  exportSvgRailBtn.addEventListener('click', openExportDialog)
+
   // --- subject loading ---
   // Snapshot of the current view, captured before a monkey OR scan switch so the incoming data
   // restores the exact same view (camera, overlays, settings) instead of resetting to defaults.
@@ -2456,6 +2550,7 @@ export function mountDashboard(root: HTMLElement, deps: Deps): void {
   const ensureView = async (): Promise<MultiView> => {
     const created = await MultiView.create(slicesCanvas, surfaceCanvas, client)
     view = created
+    if (isWhiteBg) created.setBackgroundColor(true)
     // The panes get their final flex/grid size only after this dashboard lays out; NiiVue
     // sized its canvases against the pre-layout dimensions, leaving a first-paint artifact
     // that only cleared when the user resized the window (fullscreen toggle, devtools). Observe
